@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Numba cache
+__pycache__/
+*.nbi
+*.nbc
