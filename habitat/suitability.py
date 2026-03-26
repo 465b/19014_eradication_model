@@ -102,7 +102,13 @@ def build_habitat(config: dict, paths: dict, region_dir: Path) -> None:
         layers.append(layer)
         _log_layer_stats("user data", layer_cfg.get("variable", "?"), layer)
 
-    # 3. Pre-built mask
+    # 3. SCHISM depth constraints
+    for layer_cfg in habitat_cfg.get("schism_depth_constraints", []):
+        layer = _schism_depth_layer(layer_cfg, model_lons, model_lats)
+        layers.append(layer)
+        _log_layer_stats("schism depth", layer_cfg.get("path", "?"), layer)
+
+    # 4. Pre-built mask
     if "mask_file" in habitat_cfg:
         layer = _mask_layer(habitat_cfg, model_lons, model_lats, model_times)
         layers.append(layer)
@@ -237,6 +243,49 @@ def _mask_layer(
     da_on_grid = _interp_to_grid(da, model_lons, model_lats, model_times, var_name)
     # Threshold at 0.5 handles bilinear interpolation artefacts for integer masks.
     return da_on_grid > 0.5
+
+
+def _schism_depth_layer(
+    layer_cfg: dict,
+    model_lons: np.ndarray,
+    model_lats: np.ndarray,
+) -> xr.DataArray:
+    """Interpolate SCHISM bathymetry onto the model grid and apply constraints.
+
+    Supports two depth modes (see schism_depth.schism_depth_to_grid):
+    - ``"depth_below_geoid"`` — static bathymetry only
+    - ``"total_water_depth"`` — bathymetry + tidal-mean surface elevation
+
+    Returns
+    -------
+    xr.DataArray  bool, dims (lat, lon)  — static (no time dimension)
+    """
+    from eradication.habitat.schism_depth import schism_depth_to_grid
+
+    path = Path(layer_cfg["path"])
+    mode = layer_cfg.get("mode", "depth_below_geoid")
+    crs  = layer_cfg.get("crs", "EPSG:2193")
+
+    depth_grid = schism_depth_to_grid(path, mode, crs, model_lons, model_lats)
+
+    da = xr.DataArray(
+        depth_grid,
+        dims=["lat", "lon"],
+        coords={"lat": model_lats, "lon": model_lons},
+        name="schism_depth",
+        attrs={
+            "mode":     mode,
+            "source":   str(path),
+            "units":    "metres",
+            "positive": "down",
+        },
+    )
+    return _apply_constraint(
+        da,
+        min_val=layer_cfg.get("min"),
+        max_val=layer_cfg.get("max"),
+        equal_to=layer_cfg.get("equal_to"),
+    )
 
 
 # ---------------------------------------------------------------------------
