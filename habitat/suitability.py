@@ -70,11 +70,13 @@ def build_habitat(config: dict, paths: dict, region_dir: Path) -> None:
 
     if habitat_cfg is None:
         logger.info("No 'habitat' section in config — all cells treated as suitable.")
-        _write_habitat(
-            _all_true_2d(model_lons, model_lats,
-                         attrs={"description": "All cells suitable (no habitat constraints configured)"}),
-            region_dir,
+        result = _all_true_2d(
+            model_lons, model_lats,
+            attrs={"description": "All cells suitable (no habitat constraints configured)"},
         )
+        _write_habitat(result, region_dir)
+        if config.get("debug", {}).get("plot_habitat", False):
+            _plot_habitat_debug(result, region_dir)
         return
 
     layers: list[xr.DataArray] = []
@@ -115,6 +117,9 @@ def build_habitat(config: dict, paths: dict, region_dir: Path) -> None:
         result = _stack_layers(layers)
 
     _write_habitat(result, region_dir)
+
+    if config.get("debug", {}).get("plot_habitat", False):
+        _plot_habitat_debug(result, region_dir)
 
 
 def load_habitat(habitat_path: Path) -> xr.DataArray:
@@ -359,6 +364,74 @@ def _write_habitat(mask: xr.DataArray, region_dir: Path) -> None:
     encoding = {"habitat": {"dtype": "u1"}}
     ds.to_netcdf(out_path, encoding=encoding)
     logger.info("Habitat suitability written to %s", out_path)
+
+
+def _plot_habitat_debug(mask: xr.DataArray, region_dir: Path) -> None:
+    """Save a debug PNG of the habitat suitability mask.
+
+    For a 3-D (time, lat, lon) mask the time-mean fraction of suitable
+    timesteps is plotted [0, 1].  For a 2-D (lat, lon) mask the boolean
+    values are plotted directly.
+
+    Saved to: region_dir/habitat_suitability_debug.png
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+
+    lons = mask["lon"].values
+    lats = mask["lat"].values
+
+    if mask.ndim == 3:
+        data2d = mask.values.astype(float).mean(axis=0)   # fraction [0, 1]
+        cbar_label = "Fraction of timesteps suitable  [0 = never, 1 = always]"
+        title = "Habitat suitability  —  time-mean fraction suitable"
+        cmap = "RdYlGn"
+        vmin, vmax = 0.0, 1.0
+    else:
+        data2d = mask.values.astype(float)
+        cbar_label = "Suitable  [0 = no, 1 = yes]"
+        title = "Habitat suitability mask"
+        cmap = "RdYlGn"
+        vmin, vmax = 0.0, 1.0
+
+    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+
+    pad_lon = max((lons[-1] - lons[0]) * 0.5, 0.05)
+    pad_lat = max((lats[-1] - lats[0]) * 0.5, 0.05)
+    extent = [
+        lons[0]  - pad_lon, lons[-1] + pad_lon,
+        lats[0]  - pad_lat, lats[-1] + pad_lat,
+    ]
+
+    fig, ax = plt.subplots(
+        figsize=(7, 6),
+        subplot_kw={"projection": ccrs.PlateCarree()},
+        constrained_layout=True,
+    )
+
+    ax.set_extent(extent, crs=ccrs.PlateCarree())
+    ax.add_feature(cfeature.COASTLINE, linewidth=0.8)
+    ax.add_feature(cfeature.LAND, facecolor="wheat", alpha=0.6, zorder=1)
+
+    mesh = ax.pcolormesh(
+        lons, lats, data2d,
+        cmap=cmap,
+        norm=norm,
+        transform=ccrs.PlateCarree(),
+        zorder=0,
+    )
+    ax.gridlines(draw_labels=True, linewidth=0.3, alpha=0.5)
+
+    cbar = fig.colorbar(mesh, ax=ax, orientation="vertical", shrink=0.85, pad=0.02)
+    cbar.set_label(cbar_label, fontsize=9)
+    fig.suptitle(title, fontsize=11)
+
+    out = region_dir / "habitat_suitability_debug.png"
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("Habitat debug plot saved → %s", out)
 
 
 def _log_layer_stats(source: str, name: str, layer: xr.DataArray) -> None:
