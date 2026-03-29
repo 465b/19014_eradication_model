@@ -344,32 +344,64 @@ class MonitoringModel:
         dt_weeks: int,
         seed: int = 0,
         habitat_mask: np.ndarray | None = None,
-        custom_mask: np.ndarray | None = None,
+        custom_masks: dict[str, np.ndarray] | None = None,
     ) -> "MonitoringModel":
         """
         Build a MonitoringModel from the ``monitoring`` config section.
 
+        The config must contain a ``strategies`` list; each entry describes one
+        strategy and is built independently.  Strategies are seeded with
+        ``seed + i`` (where ``i`` is the list index) so they use independent
+        but deterministic RNGs.
+
         Parameters
         ----------
         cfg : dict
-            The ``monitoring`` section of the scenario YAML.
+            The ``monitoring`` section of the scenario YAML.  Must contain a
+            ``strategies`` key with a list of strategy config dicts.
         dt_weeks : int
             Model timestep size in weeks (from ``temporal.dt_weeks``).
         seed : int
-            RNG seed passed to the strategy.
+            Base RNG seed.  Strategy ``i`` receives seed ``seed + i``.
         habitat_mask : (ny, nx) bool array, optional
-            Suitable-habitat mask.  Used by ``systematic_grid`` and
-            ``random_fraction`` to restrict/define the pool of surveyed cells.
-        custom_mask : (ny, nx) bool array, optional
-            Pre-loaded boolean grid required for the ``custom_mask`` strategy.
-            The caller is responsible for loading this from the netCDF file
-            specified in ``cfg["mask_file"]``.
+            Suitable-habitat mask used by ``full_grid`` and ``random_fraction``
+            strategies.
+        custom_masks : dict[str, ndarray], optional
+            Pre-loaded boolean grids for ``custom_mask`` strategies, keyed by
+            the ``mask_file`` path string from the config.  The caller is
+            responsible for loading these from the netCDF files listed in the
+            config before calling ``from_config``.
         """
-        strategy_name = cfg["strategy"]
-        det_prob = float(cfg["detection_probability"])
-        resp_thresh = float(cfg.get("response_threshold", 0.0))
+        custom_masks = custom_masks or {}
+        strategies: list[MonitoringStrategy] = []
 
-        interval_weeks = cfg["survey_interval_weeks"]
+        for i, entry in enumerate(cfg["strategies"]):
+            strategies.append(
+                cls._build_one(
+                    entry=entry,
+                    dt_weeks=dt_weeks,
+                    seed=seed + i,
+                    habitat_mask=habitat_mask,
+                    custom_masks=custom_masks,
+                )
+            )
+
+        return cls(strategies)
+
+    @staticmethod
+    def _build_one(
+        entry: dict[str, Any],
+        dt_weeks: int,
+        seed: int,
+        habitat_mask: np.ndarray | None,
+        custom_masks: dict[str, np.ndarray],
+    ) -> MonitoringStrategy:
+        """Instantiate a single strategy from one entry in the ``strategies`` list."""
+        strategy_type = entry["type"]
+        det_prob = float(entry["detection_probability"])
+        resp_thresh = float(entry.get("response_threshold", 0.0))
+
+        interval_weeks = entry["survey_interval_weeks"]
         if interval_weeks % dt_weeks != 0:
             raise ValueError(
                 f"survey_interval_weeks={interval_weeks} is not an integer multiple "
@@ -377,46 +409,38 @@ class MonitoringModel:
             )
         interval_steps = interval_weeks // dt_weeks
 
-        if strategy_name == "systematic_grid":
-            strategies: list[MonitoringStrategy] = [
-                FullGridStrategy(
-                    survey_interval_steps=interval_steps,
-                    detection_probability=det_prob,
-                    response_threshold=resp_thresh,
-                    habitat_mask=habitat_mask,
-                    seed=seed,
-                )
-            ]
+        if strategy_type == "full_grid":
+            return FullGridStrategy(
+                survey_interval_steps=interval_steps,
+                detection_probability=det_prob,
+                response_threshold=resp_thresh,
+                habitat_mask=habitat_mask,
+                seed=seed,
+            )
 
-        elif strategy_name == "random_fraction":
-            strategies = [
-                FractionalStrategy(
-                    survey_interval_steps=interval_steps,
-                    survey_fraction=float(cfg["survey_fraction"]),
-                    detection_probability=det_prob,
-                    response_threshold=resp_thresh,
-                    habitat_mask=habitat_mask,
-                    seed=seed,
-                )
-            ]
+        if strategy_type == "random_fraction":
+            return FractionalStrategy(
+                survey_interval_steps=interval_steps,
+                survey_fraction=float(entry["survey_fraction"]),
+                detection_probability=det_prob,
+                response_threshold=resp_thresh,
+                habitat_mask=habitat_mask,
+                seed=seed,
+            )
 
-        elif strategy_name == "custom_mask":
-            if custom_mask is None:
+        if strategy_type == "custom_mask":
+            mask_file = entry["mask_file"]
+            if mask_file not in custom_masks:
                 raise ValueError(
-                    "custom_mask array required for 'custom_mask' strategy — "
-                    "load the netCDF file at cfg['mask_file'] before calling from_config"
+                    f"custom_mask strategy requires a pre-loaded array for "
+                    f"mask_file={mask_file!r} — pass it via custom_masks dict"
                 )
-            strategies = [
-                CustomMaskStrategy(
-                    mask=custom_mask,
-                    survey_interval_steps=interval_steps,
-                    detection_probability=det_prob,
-                    response_threshold=resp_thresh,
-                    seed=seed,
-                )
-            ]
+            return CustomMaskStrategy(
+                mask=custom_masks[mask_file],
+                survey_interval_steps=interval_steps,
+                detection_probability=det_prob,
+                response_threshold=resp_thresh,
+                seed=seed,
+            )
 
-        else:
-            raise ValueError(f"Unknown monitoring strategy: {strategy_name!r}")
-
-        return cls(strategies)
+        raise ValueError(f"Unknown monitoring strategy type: {strategy_type!r}")
