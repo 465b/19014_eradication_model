@@ -110,6 +110,9 @@ class PopulationModel:
         self._eradication = eradication
         self._connectivity = connectivity  # placeholder for v2
 
+        # Debug flags
+        self._plot_population = config.get("debug", {}).get("plot_population", False)
+
         # Output
         self._snapshot_interval = max(1, snapshot_interval)
         self._snapshots: list[np.ndarray] = []
@@ -120,9 +123,15 @@ class PopulationModel:
     # Public API
     # ------------------------------------------------------------------
 
-    def run(self) -> dict:
+    def run(self, output_dir: Path | None = None) -> dict:
         """
         Execute the full simulation.
+
+        Parameters
+        ----------
+        output_dir : Path, optional
+            Directory for output files (snapshots, plots).  Required when
+            ``debug.plot_population`` is True in the config.
 
         Returns
         -------
@@ -154,7 +163,20 @@ class PopulationModel:
                     "  t=%4d  total_density=%.1f  occupied_cells=%d", t, total, occ,
                 )
 
-        return self._build_result()
+        result = self._build_result()
+
+        if self._plot_population:
+            if output_dir is None:
+                log.warning(
+                    "debug.plot_population is True but no output_dir passed to run() — skipping plots."
+                )
+            else:
+                from eradication.population.plot import plot_all
+                log.info("Generating population plots ...")
+                for p in plot_all(result, out_dir=output_dir):
+                    log.info("  Plot saved → %s", p)
+
+        return result
 
     @property
     def log(self) -> list[dict[str, Any]]:
