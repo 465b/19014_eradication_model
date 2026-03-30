@@ -83,9 +83,11 @@ class PopulationModel:
         if "time" in habitat.dims:
             self._habitat_static = False
             self._habitat_3d = habitat.values.astype(bool)  # (nt, ny, nx)
+            self._n_habitat_cells = int(self._habitat_3d.any(axis=0).sum())
         else:
             self._habitat_static = True
             self._habitat_2d = habitat.values.astype(bool)  # (ny, nx)
+            self._n_habitat_cells = int(self._habitat_2d.sum())
 
         # Model timesteps
         self._timesteps = build_model_timesteps(config["temporal"])
@@ -305,4 +307,11 @@ class PopulationModel:
             "lats": self._lats,
             "lons": self._lons,
             "timesteps": self._timesteps,
+            "n_habitat_cells": self._n_habitat_cells,
+            # 2-D static mask — union over time for time-varying habitat
+            "habitat_mask": (
+                self._habitat_3d.any(axis=0)
+                if not self._habitat_static
+                else self._habitat_2d
+            ),
         }
