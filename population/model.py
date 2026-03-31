@@ -18,6 +18,7 @@ sub-model, and the grid coordinates.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -157,33 +158,54 @@ class PopulationModel:
             ``lons``               — 1-D array
             ``timesteps``          — 1-D datetime64 array
         """
-        log.info(
-            "Starting population model: %d timesteps, grid %dx%d, %d age bins",
-            self.n_timesteps, len(self._lats), len(self._lons), self._ages.n_ages,
-        )
+        # Optionally mirror all population-model log output to a file.
+        _file_handler: logging.FileHandler | None = None
+        if output_dir is not None:
+            log_path = Path(output_dir) / "population_model.log"
+            _file_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+            _file_handler.setFormatter(
+                logging.Formatter("%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+                                  datefmt="%H:%M:%S")
+            )
+            # Attach to the root logger so submodel loggers (mortality, dispersal,
+            # reproduction …) are captured as well.
+            logging.getLogger().addHandler(_file_handler)
+            log.info("Population model log → %s", log_path)
 
-        for t in range(self.n_timesteps):
-            self._step(t)
+        try:
+            log.info(
+                "Starting population model: %d timesteps, grid %dx%d, %d age bins",
+                self.n_timesteps, len(self._lats), len(self._lons), self._ages.n_ages,
+            )
 
-            if t % 52 == 0 or t == self.n_timesteps - 1:
-                total = float(self._ages.total_density().sum())
-                occ = self._ages.occupied_cells()
-                log.info(
-                    "  t=%4d  total_density=%.1f  occupied_cells=%d", t, total, occ,
-                )
+            for t in range(self.n_timesteps):
+                self._step(t)
 
-        result = self._build_result()
+                if t % 52 == 0 or t == self.n_timesteps - 1:
+                    total = float(self._ages.total_density().sum())
+                    occ = self._ages.occupied_cells()
+                    log.info(
+                        "  t=%4d  total_density=%.1f  occupied_cells=%d", t, total, occ,
+                    )
 
-        if self._plot_population:
-            if output_dir is None:
-                log.warning(
-                    "debug.plot_population is True but no output_dir passed to run() — skipping plots."
-                )
-            else:
-                from eradication.population.plot import plot_all
-                log.info("Generating population plots ...")
-                for p in plot_all(result, out_dir=output_dir):
-                    log.info("  Plot saved → %s", p)
+            result = self._build_result()
+
+            if self._plot_population:
+                if output_dir is None:
+                    log.warning(
+                        "debug.plot_population is True but no output_dir passed to run() — skipping plots."
+                    )
+                else:
+                    from eradication.population.plot import plot_all
+                    log.info("Generating population plots ...")
+                    for p in plot_all(result, out_dir=output_dir):
+                        log.info("  Plot saved → %s", p)
+
+        finally:
+            if _file_handler is not None:
+                _file_handler.flush()
+                _file_handler.close()
+                logging.getLogger().removeHandler(_file_handler)
 
         return result
 
