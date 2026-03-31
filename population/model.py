@@ -27,7 +27,8 @@ from eradication.culling.model import EradicationModel
 from eradication.monitoring.strategy import MonitoringModel
 from eradication.population import init_point_source
 from eradication.population.age_structure import AgeStructure
-from eradication.population.dispersal import DispersalModel
+from eradication.population.far_field_dispersal import FarFieldDispersal
+from eradication.population.near_field_dispersal import NearFieldDispersalModel
 from eradication.population.mortality import MortalityModel
 from eradication.population.reproduction import GrowthModel
 from copernicus_pipeline.interpolate import make_model_grid, build_model_timesteps
@@ -53,12 +54,15 @@ class PopulationModel:
         Pre-built eradication (culling) model.
     growth : GrowthModel
         Pre-built growth / recruitment model.
-    dispersal : DispersalModel
+    near_field_dispersal : NearFieldDispersalModel
         Pre-built near-field dispersal model.
     mortality : MortalityModel
         Pre-built natural mortality model.
     connectivity : dict | None
-        Lagrangian connectivity tensor (unused in v1).
+        Lagrangian connectivity tensor.
+    far_field_dispersal : FarFieldDispersal | None
+        Pre-built far-field (larval) dispersal model.  If ``None``,
+        far-field dispersal is disabled.
     snapshot_interval : int
         Store a density snapshot every *n* timesteps.  1 = every step.
     """
@@ -70,9 +74,10 @@ class PopulationModel:
         monitoring: MonitoringModel,
         eradication: EradicationModel,
         growth: GrowthModel,
-        dispersal: DispersalModel,
+        near_field_dispersal: NearFieldDispersalModel,
         mortality: MortalityModel,
         connectivity: dict | None = None,
+        far_field_dispersal: FarFieldDispersal | None = None,
         snapshot_interval: int = 1,
     ) -> None:
         # Grid coordinates
@@ -104,11 +109,12 @@ class PopulationModel:
 
         # Sub-models
         self._growth = growth
-        self._dispersal = dispersal
+        self._near_field_dispersal = near_field_dispersal
         self._mortality = mortality
         self._monitoring = monitoring
         self._eradication = eradication
-        self._connectivity = connectivity  # placeholder for v2
+        self._connectivity = connectivity
+        self._far_field_dispersal = far_field_dispersal
 
         # Debug flags
         self._plot_population = config.get("debug", {}).get("plot_population", False)
@@ -142,8 +148,9 @@ class PopulationModel:
             ``monitoring_log``     — list[dict]
             ``eradication_log``    — list[dict]
             ``growth_log``         — list[dict]
-            ``dispersal_log``      — list[dict]
-            ``mortality_log``      — list[dict]
+            ``near_field_dispersal_log``  — list[dict]
+            ``far_field_dispersal_log``  — list[dict]
+            ``mortality_log``            — list[dict]
             ``lats``               — 1-D array
             ``lons``               — 1-D array
             ``timesteps``          — 1-D datetime64 array
@@ -221,8 +228,22 @@ class PopulationModel:
             seed=100,
         )
         growth = GrowthModel.from_config(organism_cfg)
-        dispersal = DispersalModel.from_config(organism_cfg)
+        near_field_dispersal = NearFieldDispersalModel.from_config(organism_cfg)
         mortality = MortalityModel.from_config(organism_cfg)
+
+        far_field_dispersal = None
+        if connectivity is not None and (
+            "fecundity" in organism_cfg or "fecundity_csv" in organism_cfg
+        ):
+            lons, lats = make_model_grid(config["spatial"])
+            far_field_dispersal = FarFieldDispersal.from_config(
+                organism_cfg,
+                connectivity,
+                config,
+                ny=len(lats),
+                nx=len(lons),
+                rng_seed=42,
+            )
 
         snapshot_interval = int(organism_cfg.get("snapshot_interval", 1))
 
@@ -232,9 +253,10 @@ class PopulationModel:
             monitoring=monitoring,
             eradication=eradication,
             growth=growth,
-            dispersal=dispersal,
+            near_field_dispersal=near_field_dispersal,
             mortality=mortality,
             connectivity=connectivity,
+            far_field_dispersal=far_field_dispersal,
             snapshot_interval=snapshot_interval,
         )
 
@@ -260,6 +282,7 @@ class PopulationModel:
         Single timestep:
           1. Age (shift cohorts forward)
           2. Growth → recruits into age-bin 0
+          2b. Far-field dispersal → larval settlers into age-bin 0
           3. Near-field dispersal
           4. Natural mortality
           5. Monitoring → detection response
@@ -278,8 +301,14 @@ class PopulationModel:
         recruits = self._growth.step(total, habitat_mask, timestep)
         self._ages.add_recruits(recruits)
 
-        # 3. Dispersal — applied per age bin
-        self._ages.density = self._dispersal.step(
+        # 2b. Far-field dispersal — larval settlers added to age-bin 0
+        if self._far_field_dispersal is not None:
+            self._ages.add_recruits(
+                self._far_field_dispersal.step(self._ages.density, timestep)
+            )
+
+        # 3. Near-field dispersal — applied per age bin
+        self._ages.density = self._near_field_dispersal.step(
             self._ages.density, habitat_mask, timestep,
         )
 
@@ -324,7 +353,8 @@ class PopulationModel:
             "monitoring_log": self._monitoring.log,
             "eradication_log": self._eradication.log,
             "growth_log": self._growth.log,
-            "dispersal_log": self._dispersal.log,
+            "near_field_dispersal_log": self._near_field_dispersal.log,
+            "far_field_dispersal_log": self._far_field_dispersal.log if self._far_field_dispersal is not None else [],
             "mortality_log": self._mortality.log,
             "lats": self._lats,
             "lons": self._lons,

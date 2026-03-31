@@ -8,8 +8,8 @@ to every age bin.
 
 One implementation is provided:
 
-    GaussianDispersal — small Gaussian kernel convolution via
-                        ``scipy.ndimage.convolve``.
+    GaussianNearFieldDispersal — small Gaussian kernel convolution via
+                                 ``scipy.ndimage.convolve``.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import numpy as np
 from scipy.ndimage import convolve
 
 
-class DispersalModel(ABC):
+class NearFieldDispersalModel(ABC):
     """Abstract base for near-field dispersal models."""
 
     def __init__(self) -> None:
@@ -57,15 +57,15 @@ class DispersalModel(ABC):
         return self._log
 
     @classmethod
-    def from_config(cls, organism_cfg: dict) -> "DispersalModel":
+    def from_config(cls, organism_cfg: dict) -> "NearFieldDispersalModel":
         """
-        Factory: build a dispersal model from the ``organism`` config.
+        Factory: build a near-field dispersal model from the ``organism`` config.
 
-        Currently only ``GaussianDispersal`` is supported.
+        Currently only ``GaussianNearFieldDispersal`` is supported.
         """
-        return GaussianDispersal(
-            sigma=float(organism_cfg["dispersal_sigma_cells"]),
-            dispersal_fraction=float(organism_cfg["dispersal_fraction"]),
+        return GaussianNearFieldDispersal(
+            sigma=float(organism_cfg["near_field_dispersal_sigma_cells"]),
+            dispersal_fraction=float(organism_cfg["near_field_dispersal_fraction"]),
         )
 
 
@@ -74,7 +74,7 @@ class DispersalModel(ABC):
 # ---------------------------------------------------------------------------
 
 
-class GaussianDispersal(DispersalModel):
+class GaussianNearFieldDispersal(NearFieldDispersalModel):
     """
     Near-field dispersal using a small 2-D Gaussian kernel.
 

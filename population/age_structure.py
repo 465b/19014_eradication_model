@@ -9,12 +9,8 @@ along axis 0 is one weekly age cohort.  Provides the core bookkeeping:
     total_density()     — sum across ages → (ny, nx)
     apply_mortality(m)  — element-wise removal across all age bins
 
-The number of age bins is derived from the organism config::
-
-    n_ages = maturation_age_weeks + adult_age_bins * adult_bin_width_weeks
-
-Every bin has equal width (one model timestep, ``dt_weeks``).  Differential
-resolution between juveniles and adults is planned for a later iteration.
+The number of age bins equals ``organism_cfg["max_age_weeks"]``.
+Every bin has equal width (one model timestep = one week).
 """
 
 from __future__ import annotations
@@ -119,15 +115,8 @@ class AgeStructure:
         """
         Build an AgeStructure from the ``organism`` config section.
 
-        Computes ``n_ages`` as::
-
-            maturation_age_weeks + adult_age_bins * adult_bin_width_weeks
-
-        Each bin spans one model timestep (``dt_weeks``).
+        ``n_ages`` equals ``organism_cfg["max_age_weeks"]``.
+        Each bin spans one model timestep (one week).
         """
-        n_ages = (
-            int(organism_cfg["maturation_age_weeks"])
-            + int(organism_cfg["adult_age_bins"])
-            * int(organism_cfg["adult_bin_width_weeks"])
-        )
+        n_ages = int(organism_cfg["max_age_weeks"])
         return cls(n_ages=n_ages, ny=ny, nx=nx)
