@@ -193,6 +193,9 @@ class MortalityModel(ABC):
         elif has_csv:
             survival = _rates_from_csv(organism_cfg["survival_csv"], "survival_per_week", n_ages)
         else:
+            log.warning(
+                "Natural mortality disabled: neither 'survival' nor 'survival_csv' found in organism config."
+            )
             survival = np.ones(n_ages, dtype=np.float32)
 
         return AgeDependentSurvival(survival)

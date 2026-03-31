@@ -14,11 +14,14 @@ One implementation is provided:
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
 import numpy as np
 from scipy.ndimage import convolve
+
+log = logging.getLogger(__name__)
 
 
 class NearFieldDispersalModel(ABC):
@@ -61,8 +64,14 @@ class NearFieldDispersalModel(ABC):
         """
         Factory: build a near-field dispersal model from the ``organism`` config.
 
-        Currently only ``GaussianNearFieldDispersal`` is supported.
+        If ``near_field_dispersal_sigma_cells`` is absent near-field
+        dispersal is disabled (returns :class:`NoNearFieldDispersal`).
         """
+        if "near_field_dispersal_sigma_cells" not in organism_cfg:
+            log.warning(
+                "Near-field dispersal disabled: 'near_field_dispersal_sigma_cells' not found in organism config."
+            )
+            return NoNearFieldDispersal()
         return GaussianNearFieldDispersal(
             sigma=float(organism_cfg["near_field_dispersal_sigma_cells"]),
             dispersal_fraction=float(organism_cfg["near_field_dispersal_fraction"]),
@@ -72,6 +81,24 @@ class NearFieldDispersalModel(ABC):
 # ---------------------------------------------------------------------------
 # Concrete implementations
 # ---------------------------------------------------------------------------
+
+
+class NoNearFieldDispersal(NearFieldDispersalModel):
+    """
+    No-op near-field dispersal — density unchanged each timestep.
+
+    Selected automatically when ``near_field_dispersal_sigma_cells`` is
+    absent from the organism config.
+    """
+
+    def step(
+        self,
+        density: np.ndarray,
+        habitat_mask: np.ndarray,
+        timestep: int,
+    ) -> np.ndarray:
+        self._log.append({"timestep": timestep, "total_dispersed": 0.0})
+        return density
 
 
 class GaussianNearFieldDispersal(NearFieldDispersalModel):

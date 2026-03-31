@@ -117,7 +117,9 @@ class PopulationModel:
         self._far_field_dispersal = far_field_dispersal
 
         # Debug flags
-        self._plot_population = config.get("debug", {}).get("plot_population", False)
+        debug_cfg = config.get("debug", {})
+        self._plot_population = debug_cfg.get("plot_population", False)
+        self._log_processes = debug_cfg.get("log_population_processes", False)
 
         # Output
         self._snapshot_interval = max(1, snapshot_interval)
@@ -232,9 +234,15 @@ class PopulationModel:
         mortality = MortalityModel.from_config(organism_cfg)
 
         far_field_dispersal = None
-        if connectivity is not None and (
-            "fecundity" in organism_cfg or "fecundity_csv" in organism_cfg
-        ):
+        _has_fecundity = "fecundity" in organism_cfg or "fecundity_csv" in organism_cfg
+        if connectivity is None:
+            log.warning("Far-field dispersal disabled: no connectivity tensor provided.")
+        elif not _has_fecundity:
+            log.warning(
+                "Far-field dispersal disabled: neither 'fecundity' nor 'fecundity_csv' "
+                "found in organism config."
+            )
+        if connectivity is not None and _has_fecundity:
             lons, lats = make_model_grid(config["spatial"])
             far_field_dispersal = FarFieldDispersal.from_config(
                 organism_cfg,
@@ -291,41 +299,98 @@ class PopulationModel:
           8. Enforce habitat mask
           9. Log & snapshot
         """
+        lp = self._log_processes  # shorthand
         habitat_mask = self._get_habitat_mask(timestep)
 
         # 1. Age — shift bins forward, oldest die, bin 0 cleared
+        if lp:
+            _d0 = float(self._ages.total_density().sum())
         self._ages.age()
+        if lp:
+            _d1 = float(self._ages.total_density().sum())
+            log.info(
+                "  t=%d  [age]                Δ=%+.2f  (lost oldest cohort)",
+                timestep, _d1 - _d0,
+            )
 
         # 2. Growth — recruits based on total density, placed into bin 0
         total = self._ages.total_density()
         recruits = self._growth.step(total, habitat_mask, timestep)
         self._ages.add_recruits(recruits)
+        if lp:
+            log.info(
+                "  t=%d  [growth]             recruits=%.2f  Δ=%+.2f",
+                timestep, float(recruits.sum()), float(recruits.sum()),
+            )
 
         # 2b. Far-field dispersal — larval settlers added to age-bin 0
         if self._far_field_dispersal is not None:
-            self._ages.add_recruits(
-                self._far_field_dispersal.step(self._ages.density, timestep)
-            )
+            if lp:
+                _d_ff0 = float(self._ages.total_density().sum())
+            settlers = self._far_field_dispersal.step(self._ages.density, timestep)
+            self._ages.add_recruits(settlers)
+            if lp:
+                log.info(
+                    "  t=%d  [far-field dispersal] settlers=%.2f  Δ=%+.2f",
+                    timestep, float(settlers.sum()),
+                    float(self._ages.total_density().sum()) - _d_ff0,
+                )
+        elif lp:
+            log.info("  t=%d  [far-field dispersal] disabled", timestep)
 
         # 3. Near-field dispersal — applied per age bin
+        if lp:
+            _d_nf0 = float(self._ages.total_density().sum())
         self._ages.density = self._near_field_dispersal.step(
             self._ages.density, habitat_mask, timestep,
         )
+        if lp:
+            log.info(
+                "  t=%d  [near-field dispersal] Δ=%+.2f  (boundary loss)",
+                timestep, float(self._ages.total_density().sum()) - _d_nf0,
+            )
 
         # 4. Natural mortality
+        if lp:
+            _d_mort0 = float(self._ages.total_density().sum())
         self._ages.density = self._mortality.step(
             self._ages.density, timestep,
         )
+        if lp:
+            log.info(
+                "  t=%d  [natural mortality]    Δ=%+.2f",
+                timestep, float(self._ages.total_density().sum()) - _d_mort0,
+            )
 
         # 5. Monitoring
         total = self._ages.total_density()
         response = self._monitoring.step(total, timestep)
+        if lp:
+            n_detected = int((response > 0).sum())
+            log.info(
+                "  t=%d  [monitoring]          detected_cells=%d",
+                timestep, n_detected,
+            )
 
         # 6. Eradication
         cull_efficiency = self._eradication.step(response, timestep)
+        if lp:
+            n_treated = int((cull_efficiency > 0).sum())
+            log.info(
+                "  t=%d  [eradication]         treated_cells=%d  mean_efficiency=%.3f",
+                timestep, n_treated,
+                float(cull_efficiency[cull_efficiency > 0].mean()) if n_treated > 0 else 0.0,
+            )
 
         # 7. Apply eradication mortality across all age bins
+        if lp:
+            _d_cull0 = float(self._ages.total_density().sum())
         self._ages.apply_mortality(cull_efficiency)
+        if lp:
+            log.info(
+                "  t=%d  [cull applied]        Δ=%+.2f",
+                timestep, float(self._ages.total_density().sum()) - _d_cull0,
+            )
 
         # 8. Zero out unsuitable habitat
         self._ages.apply_habitat_mask(habitat_mask)

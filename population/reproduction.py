@@ -17,10 +17,13 @@ Two implementations are provided:
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 
 class GrowthModel(ABC):
@@ -66,10 +69,23 @@ class GrowthModel(ABC):
         Supported values:
             ``"logistic"``     → :class:`LogisticGrowth`
             ``"exponential"``  → :class:`ExponentialGrowth`
+            ``"none"``         → :class:`NoGrowth`
 
-        Falls back to ``"logistic"`` if the key is absent.
+        If ``growth_rate_per_week`` is absent from the config the growth
+        model is disabled (returns :class:`NoGrowth`).  Falls back to
+        ``"logistic"`` if only the *growth_model* key is absent.
         """
+        if "growth_rate_per_week" not in organism_cfg:
+            log.warning(
+                "Growth model disabled: 'growth_rate_per_week' not found in organism config."
+            )
+            return NoGrowth()
+
         kind = organism_cfg.get("growth_model", "logistic")
+
+        if kind == "none":
+            log.warning("Growth model disabled: growth_model set to 'none'.")
+            return NoGrowth()
 
         if kind == "logistic":
             return LogisticGrowth(
@@ -84,13 +100,31 @@ class GrowthModel(ABC):
 
         raise ValueError(
             f"Unknown growth_model {kind!r}. "
-            "Must be 'logistic' or 'exponential'."
+            "Must be 'logistic', 'exponential', or 'none'."
         )
 
 
 # ---------------------------------------------------------------------------
 # Concrete implementations
 # ---------------------------------------------------------------------------
+
+
+class NoGrowth(GrowthModel):
+    """
+    No-op growth model — zero recruits every timestep.
+
+    Selected automatically when ``growth_rate_per_week`` is absent from
+    the organism config, or explicitly via ``growth_model: "none"``.
+    """
+
+    def step(
+        self,
+        total_density: np.ndarray,
+        habitat_mask: np.ndarray,
+        timestep: int,
+    ) -> np.ndarray:
+        self._log.append({"timestep": timestep, "total_recruits": 0.0})
+        return np.zeros_like(total_density)
 
 
 class LogisticGrowth(GrowthModel):
