@@ -266,12 +266,16 @@ class PopulationModel:
             )
         if connectivity is not None and _has_fecundity:
             lons, lats = make_model_grid(config["spatial"])
+            resolution_m = float(config["spatial"]["resolution_m"])
+            organism_type = organism_cfg.get("type", "discrete")
             far_field_dispersal = FarFieldDispersal.from_config(
                 organism_cfg,
                 connectivity,
                 config,
                 ny=len(lats),
                 nx=len(lons),
+                cell_area_m2=resolution_m ** 2,
+                organism_type=organism_type,
                 rng_seed=42,
             )
 

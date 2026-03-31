@@ -4,9 +4,30 @@ Far-field larval dispersal model for the population simulation.
 Adults produce larvae each timestep.  Those larvae drift via ocean currents
 and are captured by the pre-computed Lagrangian connectivity tensor, which
 maps (source cell, travel-time weeks) → (destination cell, probability).
-Larvae are Poisson-sampled into a settling tensor tracking future arrivals;
-at each timestep the slot representing "arriving now" is returned to the
-population model as new recruits at age-bin 0.
+Larvae are routed through the connectivity tensor and accumulate in a
+settling tensor tracking future arrivals; at each timestep the slot
+representing "arriving now" is returned to the population model as new
+recruits at age-bin 0.
+
+## Unit convention
+
+The state variable throughout the model is **areal density** (ind/m²).
+Fecundity is *larvae per individual per week*, so the raw output of the
+einsum is also a density:
+
+    larvae_produced [larvae/m²] = Σ_a fecundity[a] [larvae/ind/wk]
+                                     × density[a] [ind/m²]
+
+Routing through the connectivity tensor requires a **count** (the Poisson
+distribution is over discrete larvae), so for ``organism_type="discrete"``
+we convert:
+
+    count = larvae_produced × cell_area_m2   → Poisson sample → density = count / cell_area_m2
+
+For ``organism_type="continuous"`` (future: coverage fraction) the
+propagation is deterministic and no area conversion is needed; larvae
+(or rather propagules) are simply multiplied by the connectivity weight
+and accumulated in the settling tensor as-is.
 
 ``FarFieldDispersal`` is constructed from:
 
@@ -21,6 +42,11 @@ population model as new recruits at age-bin 0.
         Length of the settling tensor age axis.  Must satisfy
         ``connectivity["age"].max() < competency_period_weeks``; raises
         ``ValueError`` otherwise.
+    cell_area_m2 : float
+        Area of one grid cell in m².  Used for the density↔count conversion
+        in discrete-organism mode.  Derived from ``spatial.resolution_m²``.
+    organism_type : str
+        ``"discrete"`` (default) or ``"continuous"``.
 
 Configuration (``organism`` config section) supports two mutually exclusive
 fecundity specs:
@@ -169,6 +195,8 @@ class FarFieldDispersal:
         competency_period_weeks: int,
         ny: int,
         nx: int,
+        cell_area_m2: float = 1.0,
+        organism_type: str = "discrete",
         rng_seed: int = 0,
     ) -> None:
         max_travel = int(connectivity["age"].max()) if len(connectivity["age"]) > 0 else 0
@@ -179,10 +207,17 @@ class FarFieldDispersal:
                 "Ensure the connectivity tensor was built with the same competency period."
             )
 
+        if organism_type not in ("discrete", "continuous"):
+            raise ValueError(
+                f"organism_type must be 'discrete' or 'continuous', got {organism_type!r}."
+            )
+
         self._fecundity = np.asarray(fecundity_by_week, dtype=np.float32)
         self._competency = competency_period_weeks
         self._ny = ny
         self._nx = nx
+        self._cell_area_m2 = float(cell_area_m2)
+        self._organism_type = organism_type
 
         # Store connectivity arrays (defensive copies, fixed dtypes)
         self._src_y = connectivity["src_y"].astype(np.int32)
@@ -231,17 +266,37 @@ class FarFieldDispersal:
             "a,ayx->yx", self._fecundity, density
         ).astype(np.float32)
 
-        # 4. Route larvae through connectivity tensor using Poisson sampling.
+        # 4. Route larvae through connectivity tensor.
+        #
+        #    Each connectivity weight w is the per-larva probability that a
+        #    single larva released at source s settles at destination d after
+        #    k weeks (Binomial trial).  Given N larvae at the source, the
+        #    number of settlers is Binomial(N, w) ≈ Poisson(N × w) — the
+        #    Poisson approximation holds when N is large and w is small.
+        #
+        #    "discrete" organisms: larvae_produced is a density [larvae/m²].
+        #    We convert to a count (N = density × cell_area_m2) before
+        #    sampling, then convert the settler count back to density.
+        #
+        #    "continuous" organisms: propagules are a dimensionless fraction;
+        #    no area conversion is needed and settlement is deterministic
+        #    (the Binomial / Poisson interpretation does not apply).
         if len(self._src_x) > 0:
-            expected = (
-                larvae_produced[self._src_y, self._src_x].astype(np.float64)
-                * self._weight.astype(np.float64)
-            )
-            n_settling = self._rng.poisson(expected)
+            src_larvae = larvae_produced[self._src_y, self._src_x].astype(np.float64)
+
+            if self._organism_type == "discrete":
+                # density [larvae/m²] → count [larvae]
+                expected = src_larvae * self._cell_area_m2 * self._weight.astype(np.float64)
+                n_settling = self._rng.poisson(expected)
+                # count [settlers] → density [settlers/m²]
+                settling_contribution = n_settling / self._cell_area_m2
+            else:  # "continuous"
+                settling_contribution = src_larvae * self._weight.astype(np.float64)
+
             np.add.at(
                 self._settling,
                 (self._travel_age, self._dst_y, self._dst_x),
-                n_settling,
+                settling_contribution,
             )
 
         # 5. Log
@@ -269,6 +324,8 @@ class FarFieldDispersal:
         full_config: dict,
         ny: int,
         nx: int,
+        cell_area_m2: float = 1.0,
+        organism_type: str = "discrete",
         rng_seed: int = 0,
     ) -> "FarFieldDispersal":
         """
@@ -286,6 +343,12 @@ class FarFieldDispersal:
             ``full_config["connectivity"]["competency_period_weeks"]``.
         ny, nx : int
             Spatial grid dimensions.
+        cell_area_m2 : float
+            Area of one grid cell in m² — used for the density↔count
+            conversion in discrete-organism mode.  Pass
+            ``spatial.resolution_m ** 2`` from the full config.
+        organism_type : str
+            ``"discrete"`` (default) or ``"continuous"``.
         rng_seed : int
             Seed for the Poisson RNG.
         """
@@ -318,5 +381,7 @@ class FarFieldDispersal:
             competency_period_weeks=competency_period_weeks,
             ny=ny,
             nx=nx,
+            cell_area_m2=cell_area_m2,
+            organism_type=organism_type,
             rng_seed=rng_seed,
         )
