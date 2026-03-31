@@ -80,6 +80,8 @@ class PopulationModel:
         connectivity: dict | None = None,
         far_field_dispersal: FarFieldDispersal | None = None,
         snapshot_interval: int = 1,
+        carrying_capacity: float | None = None,
+        carrying_capacity_suppression: str = "linear",
     ) -> None:
         # Grid coordinates
         self._lons, self._lats = make_model_grid(config["spatial"])
@@ -116,6 +118,16 @@ class PopulationModel:
         self._eradication = eradication
         self._connectivity = connectivity
         self._far_field_dispersal = far_field_dispersal
+
+        # Carrying capacity (optional) — applied as a smooth suppression factor
+        _SUPPRESSION_KINDS = ("linear", "exponential")
+        if carrying_capacity_suppression not in _SUPPRESSION_KINDS:
+            raise ValueError(
+                f"carrying_capacity_suppression must be one of {_SUPPRESSION_KINDS}, "
+                f"got {carrying_capacity_suppression!r}."
+            )
+        self._K: float | None = carrying_capacity
+        self._suppression_kind: str = carrying_capacity_suppression
 
         # Debug flags
         debug_cfg = config.get("debug", {})
@@ -280,6 +292,14 @@ class PopulationModel:
             )
 
         snapshot_interval = int(organism_cfg.get("snapshot_interval", 1))
+        carrying_capacity = (
+            float(organism_cfg["carrying_capacity"])
+            if "carrying_capacity" in organism_cfg
+            else None
+        )
+        carrying_capacity_suppression = organism_cfg.get(
+            "carrying_capacity_suppression", "linear"
+        )
 
         return cls(
             config=config,
@@ -292,11 +312,37 @@ class PopulationModel:
             connectivity=connectivity,
             far_field_dispersal=far_field_dispersal,
             snapshot_interval=snapshot_interval,
+            carrying_capacity=carrying_capacity,
+            carrying_capacity_suppression=carrying_capacity_suppression,
         )
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _compute_suppression(self, total_density: np.ndarray) -> np.ndarray | None:
+        """
+        Return the (ny, nx) suppression factor for additive fluxes, or None
+        if no carrying capacity is configured.
+
+        Supported functions (``carrying_capacity_suppression`` config key):
+
+            ``"linear"``      — ``max(0, 1 − N/K)``
+                                Linear decline to zero at N = K.  Equivalent
+                                to the classic logistic limiting factor.
+
+            ``"exponential"`` — ``exp(−N/K)``
+                                Exponential decay, always positive (never
+                                reaches zero).  Allows some recruitment even
+                                at very high density; no hard boundary at K.
+        """
+        if self._K is None:
+            return None
+        N = total_density
+        if self._suppression_kind == "linear":
+            return np.clip(1.0 - N / self._K, 0.0, 1.0).astype(np.float32)
+        # "exponential"
+        return np.exp(-N / self._K).astype(np.float32)
 
     def _get_habitat_mask(self, timestep: int) -> np.ndarray:
         """
@@ -315,15 +361,16 @@ class PopulationModel:
         """
         Single timestep:
           1. Age (shift cohorts forward)
-          2. Growth → recruits into age-bin 0
-          2b. Far-field dispersal → larval settlers into age-bin 0
-          3. Near-field dispersal
-          4. Natural mortality
-          5. Monitoring → detection response
-          6. Eradication → cull efficiency
-          7. Apply eradication mortality
-          8. Enforce habitat mask
-          9. Log & snapshot
+          2. K suppression factor computed from current density
+          3. Growth → recruits × suppression → age-bin 0
+          3b. Far-field dispersal → settlers × suppression → age-bin 0
+          4. Near-field dispersal (redistribution, no suppression)
+          5. Natural mortality
+          6. Monitoring → detection response
+          7. Eradication → cull efficiency
+          8. Apply eradication mortality
+          9. Enforce habitat mask
+          10. Log & snapshot
         """
         lp = self._log_processes  # shorthand
         habitat_mask = self._get_habitat_mask(timestep)
@@ -339,9 +386,23 @@ class PopulationModel:
                 timestep, _d1 - _d0,
             )
 
-        # 2. Growth — recruits based on total density, placed into bin 0
+        # 2. Compute carrying-capacity suppression from current density.
+        #    Applied to all additive fluxes (growth recruits and far-field
+        #    settlers) so that density approaches K smoothly.
         total = self._ages.total_density()
+        suppression = self._compute_suppression(total)
+        if lp and suppression is not None:
+            n_limited = int((suppression < 1.0).sum())
+            mean_sup = float(suppression[suppression < 1.0].mean()) if n_limited > 0 else 1.0
+            log.info(
+                "  t=%d  [K suppression]       K=%.1f  fn=%s  cells_limited=%d  mean_factor=%.3f",
+                timestep, self._K, self._suppression_kind, n_limited, mean_sup,
+            )
+
+        # 3. Growth — recruits based on total density, placed into bin 0
         recruits = self._growth.step(total, habitat_mask, timestep)
+        if suppression is not None:
+            recruits = recruits * suppression
         self._ages.add_recruits(recruits)
         if lp:
             log.info(
@@ -349,11 +410,13 @@ class PopulationModel:
                 timestep, float(recruits.sum()), float(recruits.sum()),
             )
 
-        # 2b. Far-field dispersal — larval settlers added to age-bin 0
+        # 3b. Far-field dispersal — larval settlers added to age-bin 0
         if self._far_field_dispersal is not None:
             if lp:
                 _d_ff0 = float(self._ages.total_density().sum())
             settlers = self._far_field_dispersal.step(self._ages.density, timestep)
+            if suppression is not None:
+                settlers = settlers * suppression
             self._ages.add_recruits(settlers)
             if lp:
                 log.info(

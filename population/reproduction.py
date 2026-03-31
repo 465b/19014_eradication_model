@@ -7,17 +7,24 @@ age bin.  The growth model does **not** modify the existing density
 in-place — the caller (:class:`PopulationModel`) is responsible for
 feeding recruits into the age structure.
 
-Two implementations are provided:
+Growth models compute a raw recruitment flux only.  Density-dependent
+limitation via a carrying capacity *K* is applied externally by the
+caller using a configurable suppression factor (see
+``carrying_capacity_suppression`` in the schema) — this keeps K logic
+in one place and applies it uniformly to growth, far-field dispersal,
+and any other additive process.
 
-    LogisticGrowth  — density-dependent recruitment bounded by a carrying
-                      capacity *K*.
-    ExponentialGrowth — unbounded constant-rate recruitment (useful for
-                        testing / short-horizon runs).
+One concrete implementation is provided:
+
+    ConstantGrowth — ``recruits = r · N``; unbounded per-capita rate.
+                     Combined with external K suppression this gives
+                     the classic logistic curve.
 """
 
 from __future__ import annotations
 
 import logging
+import warnings
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -27,7 +34,15 @@ log = logging.getLogger(__name__)
 
 
 class GrowthModel(ABC):
-    """Abstract base for population growth / recruitment models."""
+    """
+    Abstract base for population growth / recruitment models.
+
+    Subclasses compute a raw recruitment flux from the current density
+    field.  Any density-dependent ceiling (carrying capacity) is
+    applied by :class:`~eradication.population.model.PopulationModel`
+    after the raw flux is returned, so subclasses do **not** need to
+    be aware of *K*.
+    """
 
     def __init__(self) -> None:
         self._log: list[dict[str, Any]] = []
@@ -40,7 +55,7 @@ class GrowthModel(ABC):
         timestep: int,
     ) -> np.ndarray:
         """
-        Compute the recruitment field for one model timestep.
+        Compute the raw recruitment field for one model timestep.
 
         Parameters
         ----------
@@ -55,6 +70,8 @@ class GrowthModel(ABC):
         -------
         recruits : (ny, nx) float32 array
             New individuals to add to age-bin 0.  Non-negative.
+            *Not* yet limited by carrying capacity — the caller applies
+            the ``max(0, 1 − N/K)`` suppression factor externally.
         """
 
     @property
@@ -67,13 +84,16 @@ class GrowthModel(ABC):
         Factory: dispatch on ``organism_cfg["growth_model"]``.
 
         Supported values:
-            ``"logistic"``     → :class:`LogisticGrowth`
-            ``"exponential"``  → :class:`ExponentialGrowth`
+            ``"constant"``     → :class:`ConstantGrowth` (default)
             ``"none"``         → :class:`NoGrowth`
 
-        If ``growth_rate_per_week`` is absent from the config the growth
-        model is disabled (returns :class:`NoGrowth`).  Falls back to
-        ``"logistic"`` if only the *growth_model* key is absent.
+        Legacy values ``"logistic"`` and ``"exponential"`` are accepted
+        with a deprecation warning and mapped to :class:`ConstantGrowth`
+        (carrying-capacity suppression is now applied externally by
+        :class:`~eradication.population.model.PopulationModel`).
+
+        If ``growth_rate_per_week`` is absent the growth model is
+        disabled (:class:`NoGrowth` returned).
         """
         if "growth_rate_per_week" not in organism_cfg:
             log.warning(
@@ -81,26 +101,29 @@ class GrowthModel(ABC):
             )
             return NoGrowth()
 
-        kind = organism_cfg.get("growth_model", "logistic")
+        kind = organism_cfg.get("growth_model", "constant")
 
         if kind == "none":
             log.warning("Growth model disabled: growth_model set to 'none'.")
             return NoGrowth()
 
-        if kind == "logistic":
-            return LogisticGrowth(
-                growth_rate=float(organism_cfg["growth_rate_per_week"]),
-                carrying_capacity=float(organism_cfg["carrying_capacity"]),
+        if kind in ("logistic", "exponential"):
+            warnings.warn(
+                f"growth_model={kind!r} is deprecated. Use 'constant' instead. "
+                "Carrying-capacity suppression is now applied externally by "
+                "PopulationModel using the shared max(0, 1-N/K) factor.",
+                DeprecationWarning,
+                stacklevel=2,
             )
+            kind = "constant"
 
-        if kind == "exponential":
-            return ExponentialGrowth(
+        if kind == "constant":
+            return ConstantGrowth(
                 growth_rate=float(organism_cfg["growth_rate_per_week"]),
             )
 
         raise ValueError(
-            f"Unknown growth_model {kind!r}. "
-            "Must be 'logistic', 'exponential', or 'none'."
+            f"Unknown growth_model {kind!r}. Must be 'constant' or 'none'."
         )
 
 
@@ -120,74 +143,32 @@ class NoGrowth(GrowthModel):
     def step(
         self,
         total_density: np.ndarray,
-        habitat_mask: np.ndarray,
+        habitat_mask: np.ndarray,  # noqa: ARG002
         timestep: int,
     ) -> np.ndarray:
         self._log.append({"timestep": timestep, "total_recruits": 0.0})
         return np.zeros_like(total_density)
 
 
-class LogisticGrowth(GrowthModel):
+class ConstantGrowth(GrowthModel):
     """
-    Logistic recruitment: new individuals appear at a rate that slows as
-    total density approaches the carrying capacity *K*.
+    Constant per-capita recruitment: ``recruits = r · N``.
+
+    The raw flux is proportional to current density with a fixed
+    intrinsic rate *r*.  Density-dependent limitation (carrying
+    capacity *K*) is applied externally by the caller via the shared
+    ``max(0, 1 − N/K)`` suppression factor, which yields the classic
+    logistic curve when K is provided:
 
     .. math::
 
-        \\text{recruits} = r \\cdot N \\cdot \\left(1 - \\frac{N}{K}\\right)
-
-    where *N* is the total density per cell, *r* is the intrinsic growth
-    rate per week, and *K* is the per-cell carrying capacity.  Recruitment
-    is zero in unsuitable habitat and clamped to non-negative.
+        \\text{recruits\\_accepted} = r \\cdot N \\cdot
+            \\max\\!\\left(0,\\, 1 - \\frac{N}{K}\\right)
 
     Parameters
     ----------
     growth_rate : float
-        Intrinsic per-week growth rate *r*.
-    carrying_capacity : float
-        Per-cell carrying capacity *K* (individuals/m²).
-    """
-
-    def __init__(self, growth_rate: float, carrying_capacity: float) -> None:
-        super().__init__()
-        if carrying_capacity <= 0:
-            raise ValueError("carrying_capacity must be > 0")
-        self.r = growth_rate
-        self.K = carrying_capacity
-
-    def step(
-        self,
-        total_density: np.ndarray,
-        habitat_mask: np.ndarray,
-        timestep: int,
-    ) -> np.ndarray:
-        recruits = self.r * total_density * (1.0 - total_density / self.K)
-        recruits[~habitat_mask] = 0.0
-        np.clip(recruits, 0.0, None, out=recruits)
-        recruits = recruits.astype(np.float32)
-
-        self._log.append({
-            "timestep": timestep,
-            "total_recruits": float(recruits.sum()),
-        })
-        return recruits
-
-
-class ExponentialGrowth(GrowthModel):
-    """
-    Exponential (unbounded) recruitment.
-
-    .. math::
-
-        \\text{recruits} = r \\cdot N
-
-    Useful for short-horizon test runs or when external mortality keeps
-    the population in check.
-
-    Parameters
-    ----------
-    growth_rate : float
-        Intrinsic per-week growth rate *r*.
+        Intrinsic per-week growth rate *r* [1/week].
     """
 
     def __init__(self, growth_rate: float) -> None:
@@ -200,10 +181,9 @@ class ExponentialGrowth(GrowthModel):
         habitat_mask: np.ndarray,
         timestep: int,
     ) -> np.ndarray:
-        recruits = self.r * total_density
+        recruits = (self.r * total_density).astype(np.float32)
         recruits[~habitat_mask] = 0.0
         np.clip(recruits, 0.0, None, out=recruits)
-        recruits = recruits.astype(np.float32)
 
         self._log.append({
             "timestep": timestep,
