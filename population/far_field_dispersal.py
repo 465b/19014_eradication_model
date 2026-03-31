@@ -16,13 +16,13 @@ Fecundity is *larvae per individual per week*, so the raw output of the
 einsum is also a density:
 
     larvae_produced [larvae/m²] = Σ_a fecundity[a] [larvae/ind/wk]
-                                     × density[a] [ind/m²]
+                                     x density[a] [ind/m²]
 
 Routing through the connectivity tensor requires a **count** (the Poisson
 distribution is over discrete larvae), so for ``organism_type="discrete"``
 we convert:
 
-    count = larvae_produced × cell_area_m2   → Poisson sample → density = count / cell_area_m2
+    count = larvae_produced x cell_area_m2   → Poisson sample → density = count / cell_area_m2
 
 For ``organism_type="continuous"`` (future: coverage fraction) the
 propagation is deterministic and no area conversion is needed; larvae
@@ -271,11 +271,11 @@ class FarFieldDispersal:
         #    Each connectivity weight w is the per-larva probability that a
         #    single larva released at source s settles at destination d after
         #    k weeks (Binomial trial).  Given N larvae at the source, the
-        #    number of settlers is Binomial(N, w) ≈ Poisson(N × w) — the
+        #    number of settlers is Binomial(N, w) ≈ Poisson(N x w) — the
         #    Poisson approximation holds when N is large and w is small.
         #
         #    "discrete" organisms: larvae_produced is a density [larvae/m²].
-        #    We convert to a count (N = density × cell_area_m2) before
+        #    We convert to a count (N = density x cell_area_m2) before
         #    sampling, then convert the settler count back to density.
         #
         #    "continuous" organisms: propagules are a dimensionless fraction;

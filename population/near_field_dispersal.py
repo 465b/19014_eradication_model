@@ -106,7 +106,7 @@ class GaussianNearFieldDispersal(NearFieldDispersalModel):
     Near-field dispersal using a small 2-D Gaussian kernel.
 
     Each timestep, a fraction (``dispersal_fraction``) of each cell's
-    density is removed and redistributed to the 3×3 neighbourhood
+    density is removed and redistributed to the 3x3 neighbourhood
     according to a Gaussian weighting.  The remainder stays in place.
 
     The kernel is precomputed once at construction and reused.
@@ -123,7 +123,7 @@ class GaussianNearFieldDispersal(NearFieldDispersalModel):
         per timestep.  Must be in (0, 1].
     """
 
-    KERNEL_RADIUS: int = 1  # 3×3 kernel
+    KERNEL_RADIUS: int = 1  # 3x3 kernel
 
     def __init__(self, sigma: float, dispersal_fraction: float) -> None:
         super().__init__()
