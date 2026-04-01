@@ -31,11 +31,33 @@ class NearFieldDispersalModel(ABC):
         self._log: list[dict[str, Any]] = []
 
     @abstractmethod
+    def compute_incoming(self, density: np.ndarray) -> np.ndarray:
+        """
+        Compute the total near-field incoming flux per cell without
+        modifying the density array.
+
+        Used to build the potential-growth buffer before suppression is
+        applied.  Only the *incoming spread* is returned (the outgoing
+        fraction is a loss, not growth, and is not suppressed).
+
+        Parameters
+        ----------
+        density : (n_ages, ny, nx) float32 array
+            Current age-structured density.
+
+        Returns
+        -------
+        incoming : (ny, nx) float32 array
+            Total incoming spread summed across all age bins.
+        """
+
+    @abstractmethod
     def step(
         self,
         density: np.ndarray,
         habitat_mask: np.ndarray,
         timestep: int,
+        suppression: np.ndarray | None = None,
     ) -> np.ndarray:
         """
         Apply dispersal to the age-structured density field.
@@ -48,6 +70,11 @@ class NearFieldDispersalModel(ABC):
             True = suitable habitat.
         timestep : int
             Current model timestep index (0-based).
+        suppression : (ny, nx) float32 array or None
+            Per-cell suppression factor in [0, 1].  When provided the
+            incoming spread at each cell is multiplied by this factor
+            before being added to the staying fraction.  The outgoing
+            fraction is unaffected.
 
         Returns
         -------
@@ -91,11 +118,16 @@ class NoNearFieldDispersal(NearFieldDispersalModel):
     absent from the organism config.
     """
 
+    def compute_incoming(self, density: np.ndarray) -> np.ndarray:
+        ny, nx = density.shape[1], density.shape[2]
+        return np.zeros((ny, nx), dtype=np.float32)
+
     def step(
         self,
         density: np.ndarray,
         habitat_mask: np.ndarray,
         timestep: int,
+        suppression: np.ndarray | None = None,
     ) -> np.ndarray:
         self._log.append({"timestep": timestep, "total_dispersed": 0.0})
         return density
@@ -154,11 +186,20 @@ class GaussianNearFieldDispersal(NearFieldDispersalModel):
             kernel /= total
         return kernel.astype(np.float32)
 
+    def compute_incoming(self, density: np.ndarray) -> np.ndarray:
+        ny, nx = density.shape[1], density.shape[2]
+        incoming = np.zeros((ny, nx), dtype=np.float32)
+        for a in range(density.shape[0]):
+            dispersing = density[a] * self.dispersal_fraction
+            incoming += convolve(dispersing, self._kernel, mode="constant", cval=0.0)
+        return incoming
+
     def step(
         self,
         density: np.ndarray,
         habitat_mask: np.ndarray,
         timestep: int,
+        suppression: np.ndarray | None = None,
     ) -> np.ndarray:
         n_ages = density.shape[0]
         total_dispersed = 0.0
@@ -168,9 +209,9 @@ class GaussianNearFieldDispersal(NearFieldDispersalModel):
             dispersing = layer * self.dispersal_fraction
             staying = layer * (1.0 - self.dispersal_fraction)
 
-            spread = convolve(
-                dispersing, self._kernel, mode="constant", cval=0.0,
-            )
+            spread = convolve(dispersing, self._kernel, mode="constant", cval=0.0)
+            if suppression is not None:
+                spread = spread * suppression
 
             new_layer = staying + spread
             new_layer[~habitat_mask] = 0.0

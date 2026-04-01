@@ -32,6 +32,7 @@ from eradication.population.far_field_dispersal import FarFieldDispersal
 from eradication.population.near_field_dispersal import NearFieldDispersalModel
 from eradication.population.mortality import MortalityModel
 from eradication.population.reproduction import GrowthModel
+from eradication.population.suppression import SuppressionFunction
 from copernicus_pipeline.interpolate import make_model_grid, build_model_timesteps
 
 log = logging.getLogger(__name__)
@@ -120,14 +121,12 @@ class PopulationModel:
         self._far_field_dispersal = far_field_dispersal
 
         # Carrying capacity (optional) — applied as a smooth suppression factor
-        _SUPPRESSION_KINDS = ("linear", "exponential")
-        if carrying_capacity_suppression not in _SUPPRESSION_KINDS:
-            raise ValueError(
-                f"carrying_capacity_suppression must be one of {_SUPPRESSION_KINDS}, "
-                f"got {carrying_capacity_suppression!r}."
-            )
         self._K: float | None = carrying_capacity
-        self._suppression_kind: str = carrying_capacity_suppression
+        self._suppression_fn: SuppressionFunction | None = (
+            SuppressionFunction.from_config(carrying_capacity_suppression, carrying_capacity)
+            if carrying_capacity is not None
+            else None
+        )
 
         # Debug flags
         debug_cfg = config.get("debug", {})
@@ -320,30 +319,6 @@ class PopulationModel:
     # Internals
     # ------------------------------------------------------------------
 
-    def _compute_suppression(self, total_density: np.ndarray) -> np.ndarray | None:
-        """
-        Return the (ny, nx) suppression factor for additive fluxes, or None
-        if no carrying capacity is configured.
-
-        Supported functions (``carrying_capacity_suppression`` config key):
-
-            ``"linear"``      — ``max(0, 1 − N/K)``
-                                Linear decline to zero at N = K.  Equivalent
-                                to the classic logistic limiting factor.
-
-            ``"exponential"`` — ``exp(−N/K)``
-                                Exponential decay, always positive (never
-                                reaches zero).  Allows some recruitment even
-                                at very high density; no hard boundary at K.
-        """
-        if self._K is None:
-            return None
-        N = total_density
-        if self._suppression_kind == "linear":
-            return np.clip(1.0 - N / self._K, 0.0, 1.0).astype(np.float32)
-        # "exponential"
-        return np.exp(-N / self._K).astype(np.float32)
-
     def _get_habitat_mask(self, timestep: int) -> np.ndarray:
         """
         Return the (ny, nx) bool habitat mask for the given timestep.
@@ -386,52 +361,70 @@ class PopulationModel:
                 timestep, _d1 - _d0,
             )
 
-        # 2. Compute carrying-capacity suppression from current density.
-        #    Applied to all additive fluxes (growth recruits and far-field
-        #    settlers) so that density approaches K smoothly.
+        # 2. Accumulate all potential additive fluxes into delta_N, then
+        #    compute a single suppression factor = fn(N, delta_N).  This
+        #    prevents any individual process from pushing density past K.
+        #
+        #    Processes included in delta_N:
+        #      • growth recruits   (r · N)
+        #      • far-field settlers (larval connectivity)
+        #      • near-field incoming spread (convolve outgoing flux with kernel)
+        #
+        #    Mortality and eradication only *remove* density — no suppression.
         total = self._ages.total_density()
-        suppression = self._compute_suppression(total)
-        if lp and suppression is not None:
-            n_limited = int((suppression < 1.0).sum())
-            mean_sup = float(suppression[suppression < 1.0].mean()) if n_limited > 0 else 1.0
-            log.info(
-                "  t=%d  [K suppression]       K=%.1f  fn=%s  cells_limited=%d  mean_factor=%.3f",
-                timestep, self._K, self._suppression_kind, n_limited, mean_sup,
-            )
 
-        # 3. Growth — recruits based on total density, placed into bin 0
+        # potentiel "natural growth"
         recruits = self._growth.step(total, habitat_mask, timestep)
+        # potentiel "far field growth"
+        settlers = (
+            self._far_field_dispersal.step(self._ages.density, timestep)
+            if self._far_field_dispersal is not None
+            else np.zeros_like(total)
+        )
+        # potentiel "near field growth"
+        nf_incoming = self._near_field_dispersal.compute_incoming(self._ages.density)
+
+        suppression: np.ndarray | None = None
+        if self._suppression_fn is not None:
+            delta_n = recruits + settlers + nf_incoming
+            suppression = self._suppression_fn(total, delta_n)
+            if lp:
+                n_limited = int((suppression < 1.0).sum())
+                mean_sup = float(suppression[suppression < 1.0].mean()) if n_limited > 0 else 1.0
+                log.info(
+                    "  t=%d  [K suppression]       K=%.1f  cells_limited=%d  mean_factor=%.3f",
+                    timestep, self._K, n_limited, mean_sup,
+                )
+
+        # 3. Apply suppressed growth recruits into age-bin 0
         if suppression is not None:
             recruits = recruits * suppression
         self._ages.add_recruits(recruits)
         if lp:
             log.info(
-                "  t=%d  [growth]             recruits=%.2f  Δ=%+.2f",
-                timestep, float(recruits.sum()), float(recruits.sum()),
+                "  t=%d  [growth]             recruits=%.2f",
+                timestep, float(recruits.sum()),
             )
 
-        # 3b. Far-field dispersal — larval settlers added to age-bin 0
+        # 3b. Apply suppressed far-field settlers into age-bin 0
         if self._far_field_dispersal is not None:
-            if lp:
-                _d_ff0 = float(self._ages.total_density().sum())
-            settlers = self._far_field_dispersal.step(self._ages.density, timestep)
             if suppression is not None:
                 settlers = settlers * suppression
             self._ages.add_recruits(settlers)
             if lp:
                 log.info(
-                    "  t=%d  [far-field dispersal] settlers=%.2f  Δ=%+.2f",
+                    "  t=%d  [far-field dispersal] settlers=%.2f",
                     timestep, float(settlers.sum()),
-                    float(self._ages.total_density().sum()) - _d_ff0,
                 )
         elif lp:
             log.info("  t=%d  [far-field dispersal] disabled", timestep)
 
-        # 3. Near-field dispersal — applied per age bin
+        # 3c. Near-field dispersal — suppression applied to incoming spread only;
+        #     the staying fraction is unaffected (conservative redistribution).
         if lp:
             _d_nf0 = float(self._ages.total_density().sum())
         self._ages.density = self._near_field_dispersal.step(
-            self._ages.density, habitat_mask, timestep,
+            self._ages.density, habitat_mask, timestep, suppression,
         )
         if lp:
             log.info(

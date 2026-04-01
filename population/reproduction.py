@@ -71,7 +71,7 @@ class GrowthModel(ABC):
         recruits : (ny, nx) float32 array
             New individuals to add to age-bin 0.  Non-negative.
             *Not* yet limited by carrying capacity — the caller applies
-            the ``max(0, 1 − N/K)`` suppression factor externally.
+            the ``max(0, 1 - N/K)`` suppression factor externally.
         """
 
     @property
@@ -157,7 +157,7 @@ class ConstantGrowth(GrowthModel):
     The raw flux is proportional to current density with a fixed
     intrinsic rate *r*.  Density-dependent limitation (carrying
     capacity *K*) is applied externally by the caller via the shared
-    ``max(0, 1 − N/K)`` suppression factor, which yields the classic
+    ``max(0, 1 - N/K)`` suppression factor, which yields the classic
     logistic curve when K is provided:
 
     .. math::
