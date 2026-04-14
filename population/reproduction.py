@@ -14,6 +14,16 @@ caller using a configurable suppression factor (see
 in one place and applies it uniformly to growth, far-field dispersal,
 and any other additive process.
 
+## Organism-type behaviour
+
+``growth_rate_per_week`` [1/week] is dimensionless for both organism types,
+but the operation differs:
+
+* **discrete** — ``Poisson(r * N_individuals)`` per cell.  Each individual
+  independently spawns offspring; recruit count is a stochastic integer.
+* **continuous** — ``r * coverage``; deterministic multiplicative flux on
+  the coverage fraction.
+
 One concrete implementation is provided:
 
     ConstantGrowth — ``recruits = r · N``; unbounded per-capita rate.
@@ -79,7 +89,12 @@ class GrowthModel(ABC):
         return self._log
 
     @classmethod
-    def from_config(cls, organism_cfg: dict) -> "GrowthModel":
+    def from_config(
+        cls,
+        organism_cfg: dict,
+        organism_type: str = "discrete",
+        rng: np.random.Generator | None = None,
+    ) -> "GrowthModel":
         """
         Factory: dispatch on ``organism_cfg["growth_model"]``.
 
@@ -94,6 +109,16 @@ class GrowthModel(ABC):
 
         If ``growth_rate_per_week`` is absent the growth model is
         disabled (:class:`NoGrowth` returned).
+
+        Parameters
+        ----------
+        organism_cfg : dict
+            ``config["organism"]`` section.
+        organism_type : str
+            ``"discrete"`` or ``"continuous"`` — controls whether Poisson
+            sampling or multiplicative flux is used in ``step()``.
+        rng : np.random.Generator, optional
+            Shared RNG for Poisson draws (discrete mode only).
         """
         if "growth_rate_per_week" not in organism_cfg:
             log.warning(
@@ -120,6 +145,8 @@ class GrowthModel(ABC):
         if kind == "constant":
             return ConstantGrowth(
                 growth_rate=float(organism_cfg["growth_rate_per_week"]),
+                organism_type=organism_type,
+                rng=rng,
             )
 
         raise ValueError(
@@ -152,13 +179,18 @@ class NoGrowth(GrowthModel):
 
 class ConstantGrowth(GrowthModel):
     """
-    Constant per-capita recruitment: ``recruits = r · N``.
+    Constant per-capita recruitment.
 
-    The raw flux is proportional to current density with a fixed
-    intrinsic rate *r*.  Density-dependent limitation (carrying
-    capacity *K*) is applied externally by the caller via the shared
-    ``max(0, 1 - N/K)`` suppression factor, which yields the classic
-    logistic curve when K is provided:
+    The operation depends on ``organism_type``:
+
+    * **discrete** — ``Poisson(r * N_individuals)`` per cell.
+      Recruits are stochastic integer counts.
+    * **continuous** — ``r * coverage``; deterministic flux proportional
+      to coverage fraction.
+
+    Density-dependent limitation (carrying capacity *K*) is applied
+    externally by the caller via the shared suppression factor, which
+    yields the classic logistic curve when K is provided:
 
     .. math::
 
@@ -169,11 +201,26 @@ class ConstantGrowth(GrowthModel):
     ----------
     growth_rate : float
         Intrinsic per-week growth rate *r* [1/week].
+    organism_type : str
+        ``"discrete"`` or ``"continuous"``.
+    rng : np.random.Generator, optional
+        Shared RNG for Poisson draws (discrete mode only).
     """
 
-    def __init__(self, growth_rate: float) -> None:
+    def __init__(
+        self,
+        growth_rate: float,
+        organism_type: str = "discrete",
+        rng: np.random.Generator | None = None,
+    ) -> None:
         super().__init__()
+        if organism_type not in ("discrete", "continuous"):
+            raise ValueError(
+                f"organism_type must be 'discrete' or 'continuous', got {organism_type!r}."
+            )
         self.r = growth_rate
+        self._organism_type = organism_type
+        self._rng = rng if rng is not None else np.random.default_rng()
 
     def step(
         self,
@@ -181,9 +228,17 @@ class ConstantGrowth(GrowthModel):
         habitat_mask: np.ndarray,
         timestep: int,
     ) -> np.ndarray:
-        recruits = (self.r * total_density).astype(np.float32)
+        if self._organism_type == "discrete":
+            # Poisson: each individual independently spawns recruits with rate r
+            lam = self.r * total_density.astype(np.float64)
+            np.clip(lam, 0.0, None, out=lam)
+            recruits = self._rng.poisson(lam).astype(np.float32)
+        else:
+            # Deterministic multiplicative flux on coverage fraction
+            recruits = (self.r * total_density).astype(np.float32)
+            np.clip(recruits, 0.0, None, out=recruits)
+
         recruits[~habitat_mask] = 0.0
-        np.clip(recruits, 0.0, None, out=recruits)
 
         self._log.append({
             "timestep": timestep,

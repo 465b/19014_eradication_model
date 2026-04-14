@@ -47,8 +47,9 @@ class EradicationModel(ABC):
         Returns
         -------
         cull_efficiency : (ny, nx) float32 array
-            Fraction of individuals to remove per cell.
-            0.0 = untreated, 1.0 = complete removal.
+            Fraction of density to remove per cell; unit-agnostic —
+            applies to individuals/cell (discrete) or coverage (continuous)
+            equally.  0.0 = untreated, 1.0 = complete removal.
         """
 
     @property
@@ -105,7 +106,9 @@ class FlatFractionCulling(EradicationModel):
     Parameters
     ----------
     cull_fraction : float
-        Fraction of individuals removed in treated cells.  Must be in (0, 1].
+        Fraction of density removed in treated cells; applies to
+        individuals/cell (discrete) or coverage fraction (continuous) equally.
+        Must be in (0, 1].
 
     Example
     -------

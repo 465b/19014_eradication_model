@@ -42,6 +42,11 @@ class PopulationModel:
     """
     Spatially-explicit, age-structured population model.
 
+    The **state variable** stored per cell depends on ``organism.type``:
+
+    * ``"discrete"``   — individuals per cell (integer-compatible float)
+    * ``"continuous"`` — coverage fraction in [0, 1]
+
     Parameters
     ----------
     config : dict
@@ -156,7 +161,9 @@ class PopulationModel:
         Returns
         -------
         dict with keys:
-            ``density_snapshots``  — (n_snaps, ny, nx) float32
+            ``density_snapshots``  — (n_snaps, ny, nx) float32; units are
+                                     individuals/cell (discrete) or coverage
+                                     [0-1] (continuous)
             ``snapshot_timesteps`` — list[int]
             ``population_log``     — list[dict]
             ``monitoring_log``     — list[dict]
@@ -244,6 +251,14 @@ class PopulationModel:
         organism_cfg = config["organism"]
         temporal_cfg = config["temporal"]
         dt_weeks = int(temporal_cfg["dt_weeks"])
+        organism_type: str = organism_cfg.get("type", "discrete")
+
+        # Shared RNG — seeded from debug.seed (optional) for reproducible runs.
+        # All stochastic sub-models receive this single generator so that a
+        # single seed controls the entire simulation.
+        debug_cfg = config.get("debug", {})
+        rng_seed = debug_cfg.get("seed", None)
+        rng = np.random.default_rng(rng_seed)
 
         # Resolve a static habitat mask for strategies that need it at
         # construction time (monitoring strategies use it for cell pools).
@@ -262,9 +277,11 @@ class PopulationModel:
             config["eradication"],
             seed=100,
         )
-        growth = GrowthModel.from_config(organism_cfg)
-        near_field_dispersal = NearFieldDispersalModel.from_config(organism_cfg)
-        mortality = MortalityModel.from_config(organism_cfg)
+        growth = GrowthModel.from_config(organism_cfg, organism_type=organism_type, rng=rng)
+        near_field_dispersal = NearFieldDispersalModel.from_config(
+            organism_cfg, organism_type=organism_type, rng=rng,
+        )
+        mortality = MortalityModel.from_config(organism_cfg, organism_type=organism_type, rng=rng)
 
         far_field_dispersal = None
         _has_fecundity = "fecundity" in organism_cfg or "fecundity_csv" in organism_cfg
@@ -277,17 +294,14 @@ class PopulationModel:
             )
         if connectivity is not None and _has_fecundity:
             lons, lats = make_model_grid(config["spatial"])
-            resolution_m = float(config["spatial"]["resolution_m"])
-            organism_type = organism_cfg.get("type", "discrete")
             far_field_dispersal = FarFieldDispersal.from_config(
                 organism_cfg,
                 connectivity,
                 config,
                 ny=len(lats),
                 nx=len(lons),
-                cell_area_m2=resolution_m ** 2,
+                rng=rng,
                 organism_type=organism_type,
-                rng_seed=42,
             )
 
         snapshot_interval = int(organism_cfg.get("snapshot_interval", 1))
@@ -337,8 +351,8 @@ class PopulationModel:
         Single timestep:
           1. Age (shift cohorts forward)
           2. K suppression factor computed from current density
-          3. Growth → recruits × suppression → age-bin 0
-          3b. Far-field dispersal → settlers × suppression → age-bin 0
+          3. Growth → recruits * suppression → age-bin 0
+          3b. Far-field dispersal → settlers * suppression → age-bin 0
           4. Near-field dispersal (redistribution, no suppression)
           5. Natural mortality
           6. Monitoring → detection response

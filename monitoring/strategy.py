@@ -52,8 +52,9 @@ class MonitoringStrategy(ABC):
             Probability [0, 1] of detecting the organism given it is present
             in a surveyed cell.
         response_threshold : float
-            Minimum density (ind/m² or coverage fraction) that must be
-            exceeded for a detection to trigger a treatment response.
+            Minimum density that must be exceeded for a detection to trigger
+            a treatment response.  Units match the organism state:
+            individuals/cell (discrete) | coverage fraction [0-1] (continuous).
         seed : int
             RNG seed (always seeded for reproducibility).
         """

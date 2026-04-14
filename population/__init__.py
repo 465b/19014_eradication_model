@@ -30,6 +30,8 @@ def init_point_source(
         The ``invasion`` section of the scenario YAML.  Required keys:
         ``type`` (must be ``"point_source"``), ``location.x`` (longitude),
         ``location.y`` (latitude), ``initial_density``.
+        Units of ``initial_density`` depend on ``organism.type``:
+        individuals/cell (discrete) | coverage fraction [0-1] (continuous).
     spatial_cfg : dict
         The ``spatial`` section of the scenario YAML (used to reconstruct
         the model grid).

@@ -148,7 +148,7 @@ def schism_depth_to_grid(
     if n_tris == 0:
         raise ValueError(
             f"No SCHISM triangles found within model domain ±{_DOMAIN_PAD_DEG}° "
-            f"(lon {lon_min:.3f}–{lon_max:.3f}, lat {lat_min:.3f}–{lat_max:.3f}). "
+            f"(lon {lon_min:.3f}-{lon_max:.3f}, lat {lat_min:.3f}-{lat_max:.3f}). "
             f"Check that crs='{crs}' matches the file's coordinate system."
         )
 
@@ -162,7 +162,7 @@ def schism_depth_to_grid(
     local_triangles = remap[local_faces]   # (n_tris, 3), 0-based local indices
 
     logger.debug(
-        "SCHISM: %d triangles, %d nodes in padded domain [%.3f–%.3f, %.3f–%.3f]",
+        "SCHISM: %d triangles, %d nodes in padded domain [%.3f-%.3f, %.3f-%.3f]",
         n_tris, len(used_nodes), lon_min, lon_max, lat_min, lat_max,
     )
 

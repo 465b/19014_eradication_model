@@ -34,6 +34,14 @@ Configuration
 Selected via ``organism.carrying_capacity_suppression`` in the scenario
 config (``"linear"`` or ``"exponential"``).  Only active when
 ``organism.carrying_capacity`` is also provided.
+
+The suppression formula is **unit-agnostic**: it compares N and ΔN against
+K using the same ratio regardless of whether the state is in individuals/cell
+(discrete) or coverage fraction (continuous).  K is interpreted in the same
+units as the state:
+
+* discrete   — K in individuals per cell
+* continuous — K as max coverage fraction [0-1]
 """
 
 from __future__ import annotations

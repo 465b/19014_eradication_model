@@ -1,16 +1,24 @@
 """
 Age-structured population state on a 2D spatial grid.
 
-Manages a 3-D density array of shape ``(n_ages, ny, nx)`` where each slice
-along axis 0 is one weekly age cohort.  Provides the core bookkeeping:
+Manages a 3-D array of shape ``(n_ages, ny, nx)`` where each slice along
+axis 0 is one weekly age cohort.  Provides the core bookkeeping:
 
     age()               — shift all cohorts forward by one timestep (oldest die)
-    add_recruits(r)     — place new individuals into age-bin 0
+    add_recruits(r)     — place new individuals/coverage into age-bin 0
     total_density()     — sum across ages → (ny, nx)
     apply_mortality(m)  — element-wise removal across all age bins
 
 The number of age bins equals ``organism_cfg["max_age_weeks"]``.
 Every bin has equal width (one model timestep = one week).
+
+The **units** stored in the array depend on ``organism.type``:
+
+* ``"discrete"``   — individuals per cell (integer-compatible float32)
+* ``"continuous"`` — coverage fraction in [0, 1]
+
+This class is unit-agnostic: it stores and manipulates whatever values are
+placed in it without enforcing a particular unit convention.
 """
 
 from __future__ import annotations

@@ -1,33 +1,47 @@
 """
-Far-field larval dispersal model for the population simulation.
+Far-field propagule dispersal model for the population simulation.
 
-Adults produce larvae each timestep.  Those larvae drift via ocean currents
-and are captured by the pre-computed Lagrangian connectivity tensor, which
-maps (source cell, travel-time weeks) → (destination cell, probability).
-Larvae are routed through the connectivity tensor and accumulate in a
+Adults produce propagules each timestep.  Those propagules drift via ocean
+currents and are captured by the pre-computed Lagrangian connectivity tensor,
+which maps (source cell, travel-time weeks) → (destination cell, probability).
+Propagules are routed through the connectivity tensor and accumulate in a
 settling tensor tracking future arrivals; at each timestep the slot
 representing "arriving now" is returned to the population model as new
 recruits at age-bin 0.
 
-## Unit convention
+## Unit convention — discrete organisms (``organism_type="discrete"``)
 
-The state variable throughout the model is **areal density** (ind/m²).
-Fecundity is *larvae per individual per week*, so the raw output of the
-einsum is also a density:
+The state variable is an **individual count per cell** (ind/cell).
+Fecundity is *propagules per individual per week*, so the raw einsum output
+is propagules produced per source cell:
 
-    larvae_produced [larvae/m²] = Σ_a fecundity[a] [larvae/ind/wk]
-                                     x density[a] [ind/m²]
+    propagules_produced [propagules/cell] = Σ_a f(a) [prop/ind/wk]
+                                              * n(a, y, x) [ind/cell]
 
-Routing through the connectivity tensor requires a **count** (the Poisson
-distribution is over discrete larvae), so for ``organism_type="discrete"``
-we convert:
+Routing through the connectivity tensor requires stochastic integer sampling
+(the Poisson distribution is over discrete propagules):
 
-    count = larvae_produced x cell_area_m2   → Poisson sample → density = count / cell_area_m2
+    n_settling = Poisson(propagules_produced * connectivity_weight)
 
-For ``organism_type="continuous"`` (future: coverage fraction) the
-propagation is deterministic and no area conversion is needed; larvae
-(or rather propagules) are simply multiplied by the connectivity weight
-and accumulated in the settling tensor as-is.
+The integer settler count is added directly to the destination cell —
+no area conversion is needed because the state is already a per-cell count.
+
+## Unit convention — continuous organisms (``organism_type="continuous"``)
+
+The state variable is **coverage fraction** in [0, 1].
+Fecundity is *propagules per unit-coverage per week*:
+
+    propagules_produced [propagules/cell] = Σ_a f(a) [prop/cov/wk]
+                                              * n(a, y, x) [coverage]
+
+Settlement is deterministic (no Poisson sampling):
+
+    coverage_added = propagules_produced * connectivity_weight
+                     * coverage_per_fragment
+
+where ``coverage_per_fragment`` [coverage/propagule] converts the arriving
+propagule count into a coverage increment.  Default: 1e-8 (calibrated for
+a 100 * 100 m cell).
 
 ``FarFieldDispersal`` is constructed from:
 
@@ -36,17 +50,21 @@ and accumulated in the settling tensor as-is.
         Keys: ``src_x, src_y, dst_x, dst_y, age, weight`` (all 1-D arrays).
         ``age`` = travel time in weeks; ``weight`` = settlement probability.
     fecundity_by_week : (max_age_weeks,) float32 array
-        Larvae released per individual per week for each organism age.
-        Zero for juvenile ages — no explicit masking required.
+        Propagules released per base-unit (individual or unit-coverage) per
+        week for each organism age.  Zero for juvenile ages — no explicit
+        masking required.
     competency_period_weeks : int
         Length of the settling tensor age axis.  Must satisfy
         ``connectivity["age"].max() < competency_period_weeks``; raises
         ``ValueError`` otherwise.
-    cell_area_m2 : float
-        Area of one grid cell in m².  Used for the density↔count conversion
-        in discrete-organism mode.  Derived from ``spatial.resolution_m²``.
+    rng : np.random.Generator
+        Shared random-number generator (used for Poisson sampling in discrete
+        mode).  Pass the generator created by the top-level ``PopulationModel``.
     organism_type : str
         ``"discrete"`` (default) or ``"continuous"``.
+    coverage_per_fragment : float
+        Coverage fraction introduced by one settling propagule (continuous
+        organisms only).  Default: 1e-8.
 
 Configuration (``organism`` config section) supports two mutually exclusive
 fecundity specs:
@@ -82,7 +100,7 @@ def _rates_from_steps(
     ----------
     steps : list of dicts with keys ``above_week`` and *rate_key*
     rate_key : str
-        Name of the rate value key (e.g. ``"larvae_per_week"``).
+        Name of the rate value key (e.g. ``"propagules_per_week"``).
     n_weeks : int
         Length of the output array (= ``max_age_weeks``).
 
@@ -143,7 +161,7 @@ def _rates_from_csv(
     path : str or Path
         Path to the CSV file.  Must have a header row containing *column*.
     column : str
-        Column name to read (e.g. ``"larvae_per_week"``).
+        Column name to read (e.g. ``"propagules_per_week"``).
     n_weeks : int
         Expected number of rows (= ``max_age_weeks``).
 
@@ -169,7 +187,7 @@ def _rates_from_csv(
 
 class FarFieldDispersal:
     """
-    Far-field larval dispersal via a pre-computed Lagrangian connectivity tensor.
+    Far-field propagule dispersal via a pre-computed Lagrangian connectivity tensor.
 
     Parameters
     ----------
@@ -178,14 +196,20 @@ class FarFieldDispersal:
         ``age`` is travel time in weeks (int); ``weight`` is float32 settlement
         probability in [0, 1].
     fecundity_by_week : (n_ages,) array-like
-        Larvae released per individual per week for each organism age bin.
+        Propagules released per base-unit (individual or unit-coverage) per
+        week for each organism age bin.
     competency_period_weeks : int
         Size of the settling tensor age axis (= max travel time + 1).
         ``connectivity["age"].max()`` must be strictly less than this value.
     ny, nx : int
         Spatial grid dimensions.
-    rng_seed : int
-        Seed for the Poisson random number generator.
+    rng : np.random.Generator
+        Shared random-number generator used for Poisson sampling (discrete mode).
+    organism_type : str
+        ``"discrete"`` (default) or ``"continuous"``.
+    coverage_per_fragment : float
+        Coverage fraction introduced by one settling propagule.  Used only
+        when ``organism_type="continuous"``.  Default: 1e-8.
     """
 
     def __init__(
@@ -195,9 +219,9 @@ class FarFieldDispersal:
         competency_period_weeks: int,
         ny: int,
         nx: int,
-        cell_area_m2: float = 1.0,
+        rng: np.random.Generator,
         organism_type: str = "discrete",
-        rng_seed: int = 0,
+        coverage_per_fragment: float = 1e-8,
     ) -> None:
         max_travel = int(connectivity["age"].max()) if len(connectivity["age"]) > 0 else 0
         if max_travel >= competency_period_weeks:
@@ -206,6 +230,15 @@ class FarFieldDispersal:
                 f"competency_period_weeks={competency_period_weeks}. "
                 "Ensure the connectivity tensor was built with the same competency period."
             )
+
+        if len(connectivity["dst_x"]) > 0:
+            if connectivity["dst_x"].max() >= nx or connectivity["dst_y"].max() >= ny:
+                raise ValueError(
+                    f"Connectivity dst indices out of bounds for grid ({ny}, {nx}): "
+                    f"dst_x max={connectivity['dst_x'].max()}, "
+                    f"dst_y max={connectivity['dst_y'].max()}. "
+                    "Re-run run_lagrangian.py to regenerate connectivity.npz."
+                )
 
         if organism_type not in ("discrete", "continuous"):
             raise ValueError(
@@ -216,8 +249,8 @@ class FarFieldDispersal:
         self._competency = competency_period_weeks
         self._ny = ny
         self._nx = nx
-        self._cell_area_m2 = float(cell_area_m2)
         self._organism_type = organism_type
+        self._coverage_per_fragment = float(coverage_per_fragment)
 
         # Store connectivity arrays (defensive copies, fixed dtypes)
         self._src_y = connectivity["src_y"].astype(np.int32)
@@ -227,10 +260,10 @@ class FarFieldDispersal:
         self._travel_age = connectivity["age"].astype(np.int32)
         self._weight = connectivity["weight"].astype(np.float32)
 
-        # Settling tensor: slot [k] = larvae arriving in k more weeks
+        # Settling tensor: slot [k] = propagules/coverage arriving in k more weeks
         self._settling = np.zeros((competency_period_weeks, ny, nx), dtype=np.float32)
 
-        self._rng = np.random.default_rng(rng_seed)
+        self._rng = rng
         self._log: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------
@@ -239,59 +272,70 @@ class FarFieldDispersal:
 
     def step(self, density: np.ndarray, timestep: int) -> np.ndarray:
         """
-        Advance the larval dispersal model by one timestep.
+        Advance the propagule dispersal model by one timestep.
 
         Parameters
         ----------
         density : (n_ages, ny, nx) float32 array
-            Current age-structured population density.
+            Current age-structured population state.
+            Units: individuals/cell (discrete) | coverage [0-1] (continuous).
         timestep : int
             Current model timestep index (0-based).
 
         Returns
         -------
         settlers : (ny, nx) float32 array
-            Larvae that settle this timestep — to be added to age-bin 0.
+            Propagules/coverage settling this timestep — to be added to age-bin 0.
+            Units match the state array: individuals/cell (discrete) |
+            coverage fraction (continuous).
         """
-        # 1. Collect larvae settling this timestep
+        # 1. Collect propagules settling this timestep
         settlers = self._settling[0].copy()
 
         # 2. Shift settling tensor: slot k → k-1; zero out the now-empty last slot
         self._settling[:-1] = self._settling[1:]
         self._settling[-1] = 0.0
 
-        # 3. Compute larvae produced by the current population.
+        # 3. Compute propagules produced by the current population.
         #    fecundity is 0 for juvenile age bins — no masking needed.
-        larvae_produced = np.einsum(
+        #
+        #    discrete:   P(y, x) = Σ_a f(a) [prop/ind/wk]  * n(a, y, x) [ind/cell]
+        #                        = propagules produced at cell (y, x)
+        #    continuous: P(y, x) = Σ_a f(a) [prop/cov/wk]  * n(a, y, x) [coverage]
+        #                        = propagules produced at cell (y, x)
+        propagules_produced = np.einsum(
             "a,ayx->yx", self._fecundity, density
         ).astype(np.float32)
 
-        # 4. Route larvae through connectivity tensor.
+        # 4. Route propagules through connectivity tensor.
         #
-        #    Each connectivity weight w is the per-larva probability that a
-        #    single larva released at source s settles at destination d after
-        #    k weeks (Binomial trial).  Given N larvae at the source, the
-        #    number of settlers is Binomial(N, w) ≈ Poisson(N x w) — the
-        #    Poisson approximation holds when N is large and w is small.
+        #    Each connectivity weight w is the per-propagule probability that a
+        #    single propagule released at source s settles at destination d after
+        #    k weeks (Binomial trial).  Given N propagules at the source, the
+        #    number of settlers is Binomial(N, w) ≈ Poisson(N * w).
         #
-        #    "discrete" organisms: larvae_produced is a density [larvae/m²].
-        #    We convert to a count (N = density x cell_area_m2) before
-        #    sampling, then convert the settler count back to density.
+        #    discrete:   propagules_produced is a per-cell count [prop/cell].
+        #                Poisson-sample the integer number of settlers and add
+        #                directly to the destination cell count — no area
+        #                conversion required.
         #
-        #    "continuous" organisms: propagules are a dimensionless fraction;
-        #    no area conversion is needed and settlement is deterministic
-        #    (the Binomial / Poisson interpretation does not apply).
+        #    continuous: propagules_produced is a per-cell count derived from
+        #                coverage fractions.  Settlement is deterministic; the
+        #                arriving propagule count is scaled by
+        #                coverage_per_fragment to give a coverage increment.
         if len(self._src_x) > 0:
-            src_larvae = larvae_produced[self._src_y, self._src_x].astype(np.float64)
+            src_propagules = propagules_produced[self._src_y, self._src_x].astype(np.float64)
 
             if self._organism_type == "discrete":
-                # density [larvae/m²] → count [larvae]
-                expected = src_larvae * self._cell_area_m2 * self._weight.astype(np.float64)
-                n_settling = self._rng.poisson(expected)
-                # count [settlers] → density [settlers/m²]
-                settling_contribution = n_settling / self._cell_area_m2
+                # Poisson-sample integer settler counts; add directly as ind/cell
+                expected = src_propagules * self._weight.astype(np.float64)
+                settling_contribution = self._rng.poisson(expected).astype(np.float32)
             else:  # "continuous"
-                settling_contribution = src_larvae * self._weight.astype(np.float64)
+                # Deterministic; scale by coverage_per_fragment → coverage increment
+                settling_contribution = (
+                    src_propagules * self._weight.astype(np.float64)
+                    * self._coverage_per_fragment
+                ).astype(np.float32)
 
             np.add.at(
                 self._settling,
@@ -302,7 +346,7 @@ class FarFieldDispersal:
         # 5. Log
         self._log.append({
             "timestep": timestep,
-            "total_larvae_produced": float(larvae_produced.sum()),
+            "total_propagules_produced": float(propagules_produced.sum()),
             "total_settling": float(settlers.sum()),
         })
 
@@ -324,9 +368,8 @@ class FarFieldDispersal:
         full_config: dict,
         ny: int,
         nx: int,
-        cell_area_m2: float = 1.0,
+        rng: np.random.Generator,
         organism_type: str = "discrete",
-        rng_seed: int = 0,
     ) -> "FarFieldDispersal":
         """
         Build a FarFieldDispersal from config dicts.
@@ -343,14 +386,10 @@ class FarFieldDispersal:
             ``full_config["connectivity"]["competency_period_weeks"]``.
         ny, nx : int
             Spatial grid dimensions.
-        cell_area_m2 : float
-            Area of one grid cell in m² — used for the density↔count
-            conversion in discrete-organism mode.  Pass
-            ``spatial.resolution_m ** 2`` from the full config.
+        rng : np.random.Generator
+            Shared random-number generator passed down from ``PopulationModel``.
         organism_type : str
             ``"discrete"`` (default) or ``"continuous"``.
-        rng_seed : int
-            Seed for the Poisson RNG.
         """
         n_ages = int(organism_cfg["max_age_weeks"])
 
@@ -367,12 +406,16 @@ class FarFieldDispersal:
             )
 
         if has_inline:
-            fecundity = _rates_from_steps(organism_cfg["fecundity"], "larvae_per_week", n_ages)
+            fecundity = _rates_from_steps(organism_cfg["fecundity"], "propagules_per_week", n_ages)
         else:
-            fecundity = _rates_from_csv(organism_cfg["fecundity_csv"], "larvae_per_week", n_ages)
+            fecundity = _rates_from_csv(organism_cfg["fecundity_csv"], "propagules_per_week", n_ages)
 
         competency_period_weeks = int(
             full_config["connectivity"]["competency_period_weeks"]
+        )
+
+        coverage_per_fragment = float(
+            organism_cfg.get("coverage_per_fragment", 1e-8)
         )
 
         return cls(
@@ -381,7 +424,7 @@ class FarFieldDispersal:
             competency_period_weeks=competency_period_weeks,
             ny=ny,
             nx=nx,
-            cell_area_m2=cell_area_m2,
+            rng=rng,
             organism_type=organism_type,
-            rng_seed=rng_seed,
+            coverage_per_fragment=coverage_per_fragment,
         )
