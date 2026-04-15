@@ -133,6 +133,9 @@ class PopulationModel:
             else None
         )
 
+        # Organism type — controls whether cohort aging is applied each step
+        self._organism_type: str = config.get("organism", {}).get("type", "discrete")
+
         # Debug flags
         debug_cfg = config.get("debug", {})
         self._plot_population = debug_cfg.get("plot_population", False)
@@ -364,16 +367,18 @@ class PopulationModel:
         lp = self._log_processes  # shorthand
         habitat_mask = self._get_habitat_mask(timestep)
 
-        # 1. Age — shift bins forward, oldest die, bin 0 cleared
-        if lp:
-            _d0 = float(self._ages.total_density().sum())
-        self._ages.age()
-        if lp:
-            _d1 = float(self._ages.total_density().sum())
-            log.info(
-                "  t=%d  [age]                Δ=%+.2f  (lost oldest cohort)",
-                timestep, _d1 - _d0,
-            )
+        # 1. Age — shift bins forward, oldest die, bin 0 cleared.
+        #    Skipped for continuous organisms: coverage has no cohort structure;
+        #    the single coverage layer accumulates in place instead.
+        if self._organism_type != "continuous":
+            if lp:
+                _d0 = float(self._ages.total_density().sum())
+            self._ages.age()
+            if lp:
+                log.info(
+                    "  t=%d  [age]                Δ=%+.2f  (lost oldest cohort)",
+                    timestep, float(self._ages.total_density().sum()) - _d0,
+                )
 
         # 2. Accumulate all potential additive fluxes into delta_N, then
         #    compute a single suppression factor = fn(N, delta_N).  This
